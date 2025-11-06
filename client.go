@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 var (
@@ -18,6 +21,9 @@ type Client struct {
 	ClientError error
 	session     http.Client
 	Transport   *transport
+	// fast http mode
+	useFastHTTP    bool
+	fastHTTPClient *fasthttp.Client
 }
 
 // NewClient constructs a new client given a URL to a Postgrest instance.
@@ -58,24 +64,107 @@ func NewClient(rawURL, schema string, headers map[string]string) *Client {
 	return &c
 }
 
+// NewClientFast constructs a new client that uses fasthttp for requests.
+func NewClientFast(rawURL, schema string, headers map[string]string) *Client {
+	// Create URL from rawURL
+	baseURL, err := url.Parse(rawURL)
+	if err != nil {
+		return &Client{ClientError: err}
+	}
+
+	t := transport{
+		header:  http.Header{},
+		baseURL: *baseURL,
+		Parent:  nil,
+	}
+
+	c := Client{
+		Transport:      &t,
+		useFastHTTP:    true,
+		fastHTTPClient: &fasthttp.Client{MaxConnsPerHost: 30},
+	}
+
+	if schema == "" {
+		schema = "public"
+	}
+
+	// Set required headers
+	c.Transport.header.Set("Accept", "application/json")
+	c.Transport.header.Set("Content-Type", "application/json")
+	c.Transport.header.Set("Accept-Profile", schema)
+	c.Transport.header.Set("Content-Profile", schema)
+	c.Transport.header.Set("X-Client-Info", "postgrest-go/"+version)
+
+	// Set optional headers if they exist
+	for key, value := range headers {
+		c.Transport.header.Set(key, value)
+	}
+
+	return &c
+}
+
+// SetFastHTTPMaxConns sets the fasthttp connection pool size (per host).
+// If n <= 0, it falls back to the default of 30.
+func (c *Client) SetFastHTTPMaxConns(n int) *Client {
+	if n <= 0 {
+		n = 30
+	}
+	if c.fastHTTPClient == nil {
+		c.fastHTTPClient = &fasthttp.Client{}
+	}
+	c.fastHTTPClient.MaxConnsPerHost = n
+	return c
+}
+
 func (c *Client) Ping() bool {
-	req, err := http.NewRequest("GET", path.Join(c.Transport.baseURL.Path, ""), nil)
+	// Build full URL
+	rel := &url.URL{Path: path.Join(c.Transport.baseURL.Path, "")}
+	full := c.Transport.baseURL.ResolveReference(rel)
+
+	if c.useFastHTTP {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.Header.SetMethod("GET")
+		req.SetRequestURI(full.String())
+		// apply default headers
+		for headerName, values := range c.Transport.header {
+			for _, val := range values {
+				req.Header.Add(headerName, val)
+			}
+		}
+
+		// Use a short timeout for ping
+		deadline := time.Now().Add(5 * time.Second)
+		err := c.fastHTTPClient.DoDeadline(req, resp, deadline)
+		if err != nil {
+			c.ClientError = err
+			return false
+		}
+
+		if resp.StatusCode() != 200 {
+			c.ClientError = errors.New("ping failed")
+			return false
+		}
+		return true
+	}
+
+	req, err := http.NewRequest("GET", full.String(), nil)
 	if err != nil {
 		c.ClientError = err
-
 		return false
 	}
 
 	resp, err := c.session.Do(req)
 	if err != nil {
 		c.ClientError = err
-
 		return false
 	}
 
 	if resp.Status != "200 OK" {
 		c.ClientError = errors.New("ping failed")
-
 		return false
 	}
 
@@ -120,9 +209,41 @@ func (c *Client) Rpc(name string, count string, rpcBody interface{}) string {
 		byteBody = jsonBody
 	}
 
+	// Build full URL
+	rel := &url.URL{Path: path.Join(c.Transport.baseURL.Path, "rpc", name)}
+	full := c.Transport.baseURL.ResolveReference(rel)
+
+	if c.useFastHTTP {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.Header.SetMethod("POST")
+		req.SetRequestURI(full.String())
+		if byteBody != nil {
+			req.SetBody(byteBody)
+		}
+		// default headers
+		for headerName, values := range c.Transport.header {
+			for _, val := range values {
+				req.Header.Add(headerName, val)
+			}
+		}
+		if count != "" && (count == `exact` || count == `planned` || count == `estimated`) {
+			req.Header.Add("Prefer", "count="+count)
+		}
+
+		if err := c.fastHTTPClient.Do(req, resp); err != nil {
+			c.ClientError = err
+			return ""
+		}
+		result := string(resp.Body())
+		return result
+	}
+
 	readerBody := bytes.NewBuffer(byteBody)
-	url := path.Join(c.Transport.baseURL.Path, "rpc", name)
-	req, err := http.NewRequest("POST", url, readerBody)
+	req, err := http.NewRequest("POST", full.String(), readerBody)
 	if err != nil {
 		c.ClientError = err
 		return ""

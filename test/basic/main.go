@@ -17,7 +17,8 @@ var (
 )
 
 func main() {
-	client := postgrest.NewClient(RestUrl, schema, headers)
+	client := postgrest.NewClientFast(RestUrl, schema, headers)
+	client.SetFastHTTPMaxConns(100)
 
 	res, _, err := client.From("actor").Select("actor_id,first_name", "", false).ExecuteString()
 	if err != nil {

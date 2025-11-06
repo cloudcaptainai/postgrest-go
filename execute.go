@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/valyala/fasthttp"
 )
 
 // countType is the integer type returned from execute functions when a count
@@ -31,9 +34,80 @@ func executeHelper(ctx context.Context, client *Client, method string, body []by
 		return nil, 0, client.ClientError
 	}
 
+	// Build full URL
+	relPath := path.Join(append([]string{client.Transport.baseURL.Path}, urlFragments...)...)
+	rel := &url.URL{Path: relPath}
+	full := client.Transport.baseURL.ResolveReference(rel)
+
+	if client.useFastHTTP {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.Header.SetMethod(method)
+		req.SetRequestURI(full.String())
+		if body != nil {
+			req.SetBody(body)
+		}
+		// default headers
+		for headerName, values := range client.Transport.header {
+			for _, val := range values {
+				req.Header.Add(headerName, val)
+			}
+		}
+		// per-request headers
+		for key, val := range headers {
+			req.Header.Add(key, val)
+		}
+		// query params
+		if len(params) > 0 {
+			q := url.Values{}
+			for key, val := range params {
+				q.Add(key, val)
+			}
+			req.URI().SetQueryString(q.Encode())
+		}
+
+		if deadline, ok := ctx.Deadline(); ok {
+			if err := client.fastHTTPClient.DoDeadline(req, resp, deadline); err != nil {
+				return nil, 0, err
+			}
+		} else {
+			if err := client.fastHTTPClient.Do(req, resp); err != nil {
+				return nil, 0, err
+			}
+		}
+
+		respBody := append([]byte(nil), resp.Body()...)
+
+		// https://postgrest.org/en/stable/api.html#errors-and-http-status-codes
+		if resp.StatusCode() >= 400 {
+			var errmsg *ExecuteError
+			if err := json.Unmarshal(respBody, &errmsg); err != nil {
+				return nil, 0, fmt.Errorf("error parsing error response: %s", err.Error())
+			}
+			return nil, 0, fmt.Errorf("(%s) %s", errmsg.Code, errmsg.Message)
+		}
+
+		var count countType
+		contentRange := string(resp.Header.Peek("Content-Range"))
+		if contentRange != "" {
+			split := strings.Split(contentRange, "/")
+			if len(split) > 1 && split[1] != "*" {
+				cnt, err := strconv.ParseInt(split[1], 0, 64)
+				if err != nil {
+					return nil, 0, fmt.Errorf("error parsing count from Content-Range header: %s", err.Error())
+				}
+				count = cnt
+			}
+		}
+
+		return respBody, count, nil
+	}
+
 	readerBody := bytes.NewBuffer(body)
-	baseUrl := path.Join(append([]string{client.Transport.baseURL.Path}, urlFragments...)...)
-	req, err := http.NewRequestWithContext(ctx, method, baseUrl, readerBody)
+	req, err := http.NewRequestWithContext(ctx, method, full.String(), readerBody)
 	if err != nil {
 		return nil, 0, fmt.Errorf("error creating request: %s", err.Error())
 	}

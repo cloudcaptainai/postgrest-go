@@ -11,7 +11,7 @@ var (
 )
 
 func main() {
-	client := postgrest.NewClient(REST_URL, "", nil)
+	client := postgrest.NewClientFast(REST_URL, "", nil)
 	if client.ClientError != nil {
 		panic(client.ClientError)
 	}
