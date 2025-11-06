@@ -2,13 +2,14 @@ package postgrest
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/valyala/fasthttp"
 )
