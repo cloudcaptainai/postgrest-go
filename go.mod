@@ -1,4 +1,4 @@
-module github.com/supabase-community/postgrest-go
+module github.com/cloudcaptainai/postgrest-go
 
 go 1.21.1
 
