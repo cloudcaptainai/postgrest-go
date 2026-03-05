@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"strings"
 	"time"
 
 	json "github.com/bytedance/sonic"
@@ -90,14 +89,16 @@ func NewClientFast(rawURL, schema string, headers map[string]string) *Client {
 			WriteTimeout:        30 * time.Second,
 			MaxConnWaitTimeout:  10 * time.Second,
 			RetryIfErr: func(req *fasthttp.Request, attempts int, err error) (resetTimeout bool, retry bool) {
-				if attempts >= 3 {
+				if err == nil || attempts >= 3 {
 					return false, false
 				}
-				if err == io.EOF || err == fasthttp.ErrConnectionClosed {
-					return false, true
+				// Only retry idempotent methods to avoid duplicating writes
+				method := string(req.Header.Method())
+				if method != "GET" && method != "HEAD" && method != "OPTIONS" {
+					return false, false
 				}
-				errStr := err.Error()
-				if strings.Contains(errStr, "closed") || strings.Contains(errStr, "reset") || strings.Contains(errStr, "connection") {
+				// Retry on specific connection errors (stale ALB connections)
+				if err == io.EOF || err == fasthttp.ErrConnectionClosed {
 					return false, true
 				}
 				return false, false
