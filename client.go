@@ -98,7 +98,7 @@ func NewClientFast(rawURL, schema string, headers map[string]string) *Client {
 					return false, false
 				}
 				// Retry on specific connection errors (stale ALB connections)
-				if err == io.EOF || err == fasthttp.ErrConnectionClosed {
+				if errors.Is(err, io.EOF) || errors.Is(err, fasthttp.ErrConnectionClosed) {
 					return false, true
 				}
 				return false, false
