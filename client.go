@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"syscall"
 	"time"
 
 	json "github.com/bytedance/sonic"
@@ -80,9 +81,30 @@ func NewClientFast(rawURL, schema string, headers map[string]string) *Client {
 	}
 
 	c := Client{
-		Transport:      &t,
-		useFastHTTP:    true,
-		fastHTTPClient: &fasthttp.Client{MaxConnsPerHost: 30},
+		Transport:   &t,
+		useFastHTTP: true,
+		fastHTTPClient: &fasthttp.Client{
+			MaxConnsPerHost:     30,
+			MaxIdleConnDuration: 5 * time.Second, // Close idle connections before ALB does (ALB default 60s)
+			ReadTimeout:         30 * time.Second,
+			WriteTimeout:        30 * time.Second,
+			MaxConnWaitTimeout:  10 * time.Second,
+			RetryIfErr: func(req *fasthttp.Request, attempts int, err error) (resetTimeout bool, retry bool) {
+				if err == nil || attempts >= 3 {
+					return false, false
+				}
+				// Only retry idempotent methods to avoid duplicating writes
+				method := string(req.Header.Method())
+				if method != "GET" && method != "HEAD" && method != "OPTIONS" {
+					return false, false
+				}
+				// Retry on specific connection errors (stale ALB connections)
+				if errors.Is(err, io.EOF) || errors.Is(err, fasthttp.ErrConnectionClosed) || errors.Is(err, syscall.ECONNRESET) {
+					return false, true
+				}
+				return false, false
+			},
+		},
 	}
 
 	if schema == "" {
